@@ -1,6 +1,8 @@
 from dotenv import load_dotenv
 import os
 import json
+import threading
+import time
 
 from elevenlabs.client import ElevenLabs
 from elevenlabs.conversational_ai.conversation import Conversation
@@ -8,11 +10,7 @@ from elevenlabs.conversational_ai.default_audio_interface import DefaultAudioInt
 
 from vosk import Model as VoskModel, KaldiRecognizer
 import sounddevice as sd
-import numpy as np
 
-# ─────────────────────────────────────────────
-# ENV
-# ─────────────────────────────────────────────
 load_dotenv()
 
 ELEVEN_API_KEY = os.getenv("ELEVEN_API_KEY")
@@ -27,7 +25,9 @@ client = ElevenLabs(api_key=ELEVEN_API_KEY)
 # ElevenLabs conversation
 # ─────────────────────────────────────────────
 def start_conversation_with_agent():
-    print("\n🎤 Starting conversation...\n")
+    print("\nStarting conversation...\n")
+
+    done_event = threading.Event()
 
     conversation = Conversation(
         client=client,
@@ -36,33 +36,56 @@ def start_conversation_with_agent():
         audio_interface=DefaultAudioInterface(),
         callback_agent_response=lambda r: print(f"Agent: {r}"),
         callback_user_transcript=lambda t: print(f"You:   {t}"),
+
+        # callbacks fire from inside ElevenLabs' thread
+        # when the session actually ends — not when start_session() returns
+        callback_agent_response_correction=None,
     )
+
+    # Monkey-patch the end-of-session signal onto the audio interface
+    # so we know when ElevenLabs truly closes the mic
+    original_stop = conversation.audio_interface.stop
+    def patched_stop():
+        original_stop()
+        print("Agent mic released.")
+        done_event.set()
+    conversation.audio_interface.stop = patched_stop
 
     try:
         conversation.start_session()
+        # non-blocking, fires background thread
+        print("Waiting for session to end...")
+        done_event.wait()
     except KeyboardInterrupt:
-        print("\n⛔ Conversation interrupted.")
+        print("\nConversation interrupted.")
+        try:
+            conversation.end_session()
+        except Exception:
+            pass
+        done_event.set()
 
-    print("\n🔁 Back to listening...\n")
+    # Extra buffer after mic is released by ElevenLabs
+    time.sleep(0.8)
+    print("\nBack to listening...\n")
 
 
 # ─────────────────────────────────────────────
-# Wake word via speech recognition
+# Wake word via Vosk
 # ─────────────────────────────────────────────
 def listen_for_wake_word():
-    print("🔊 Loading speech model...")
-
+    print("Loading speech model...")
     model = VoskModel("vosk-model-small-es-0.42")
-    recognizer = KaldiRecognizer(model, 16000)
 
-    print("👂 Listening for 'hey eleven'...")
+    print("Listening for 'Hola Museito'...")
     print("Press Ctrl+C to quit.\n")
 
     while True:
-        wake_detected = False
+        recognizer = KaldiRecognizer(model, 16000)
+        wake_event = threading.Event()
 
-        def audio_callback(indata, frames, time, status):
-            nonlocal wake_detected
+        def audio_callback(indata, frames, time_info, status):
+            if wake_event.is_set():
+                return
 
             audio = indata.tobytes()
 
@@ -74,10 +97,9 @@ def listen_for_wake_word():
                     print(f"🧠 Heard: {text}")
 
                 if "hola" in text or "museito" in text:
-                    print("\n✨ Wake word detected!")
-                    wake_detected = True
+                    print("\nWake word detected!")
+                    wake_event.set()
 
-        # Start listening
         with sd.InputStream(
             samplerate=16000,
             blocksize=8000,
@@ -86,22 +108,17 @@ def listen_for_wake_word():
             callback=audio_callback,
         ):
             try:
-                while True:
-                    if wake_detected:
-                        print("🛑 Stopping listener...")
-                        break
+                wake_event.wait()
+                print("Stopping listener...")
             except KeyboardInterrupt:
-                print("\n👋 Exiting.")
+                print("\Exiting.")
                 return
 
-        # NOW we are OUTSIDE the mic stream → safe to start assistant
-        print("🚀 Launching assistant...\n")
+        time.sleep(0.5)
+        print("Launching assistant...\n")
         start_conversation_with_agent()
+        print("Listening again...\n")
 
-        print("👂 Listening again...\n")
 
-# ─────────────────────────────────────────────
-# ENTRY
-# ─────────────────────────────────────────────
 if __name__ == "__main__":
     listen_for_wake_word()
