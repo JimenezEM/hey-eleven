@@ -40,7 +40,6 @@ SELF_HEAR_GUARD = 4.0
 # --------------------------------------------------
 # reinicio de audio
 # --------------------------------------------------
-
 def reset_portaudio():
     try:
         sd.stop()
@@ -59,12 +58,12 @@ def reset_portaudio():
 
     time.sleep(0.5)
 
+
 # --------------------------------------------------
 # conversación con agente
 # --------------------------------------------------
-
 def start_conversation_with_agent():
-    print("\n starting conversation...\n")
+    print("\nstarting conversation...\n")
 
     end_requested = threading.Event()
     silence_timer = [None]
@@ -95,6 +94,14 @@ def start_conversation_with_agent():
         print(f"ending session ({reason})...")
         end_requested.set()
 
+    # cierre seguro sin bloquear el hilo principal
+    def safe_end_session():
+        try:
+            if conversation[0]:
+                conversation[0].end_session()
+        except Exception as e:
+            print(f"force end error: {e}")
+
     # fuerza el cierre inmediato de la sesión
     def force_end_now(reason):
         if end_requested.is_set():
@@ -102,11 +109,12 @@ def start_conversation_with_agent():
 
         request_end(reason)
 
-        try:
-            if conversation[0]:
-                conversation[0].end_session()
-        except Exception as e:
-            print(f"force end error: {e}")
+        shutdown_thread = threading.Thread(
+            target=safe_end_session,
+            daemon=True
+        )
+        shutdown_thread.start()
+        shutdown_thread.join(timeout=3)
 
     # temporizador de silencio
     def reset_silence_timer(delay=SILENCE_TIMEOUT):
@@ -124,7 +132,7 @@ def start_conversation_with_agent():
 
         silence_timer[0] = timer
 
-    # respuesta del agenta
+    # respuesta del agente
     def on_agent_response(response):
         if end_requested.is_set():
             return
@@ -200,7 +208,12 @@ def start_conversation_with_agent():
         end_requested.wait()
 
         try:
-            conversation[0].wait_for_session_end()
+            waiter = threading.Thread(
+                target=conversation[0].wait_for_session_end,
+                daemon=True
+            )
+            waiter.start()
+            waiter.join(timeout=3)
         except Exception:
             pass
 
@@ -214,10 +227,10 @@ def start_conversation_with_agent():
 
         print("\nreturning to wake word listener...\n")
 
+
 # --------------------------------------------------
 # Escucha de palabra clave
 # --------------------------------------------------
-
 def listen_for_wake_word():
     print("loading speech model...")
     model = VoskModel("vosk-model-small-es-0.42")
